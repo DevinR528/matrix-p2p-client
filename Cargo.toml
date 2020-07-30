@@ -1,0 +1,24 @@
+[package]
+name = "matrix-rust-p2p-client"
+version = "0.1.0"
+authors = ["Devin Ragotzy <devin.ragotzy@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libp2p = "0.22.0"
+matrix-sdk = { git = "https://github.com/DevinR528/matrix-rust-sdk", branch = "p2p/webrtc" }
+async-trait = "0.1.36"
+http = "0.2.1"
+reqwest = "0.10.6"
+tracing = "0.1.16"
+url = "2.1.1"
+# conduit = { git = "https://github.com/DevinR528/conduit", branch = "p2p" }
+conduit = { path = "../__forks__/conduit", default-features = false }
+serde_json = { version = "1.0.53", features = ["raw_value"] }
+
+[dependencies.tokio]
+version = "0.2.21"
+default-features = false
+features = ["sync", "time", "fs"]
