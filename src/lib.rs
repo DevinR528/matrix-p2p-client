@@ -101,7 +101,7 @@ pub async fn start_p2p_server(
                             return Err(MatrixError::AuthenticationRequired.to_string());
                         }
 
-                        let response = conduit_routes::conduit_server_process(
+                        let response = conduit_routes::process_request(
                             &database,
                             ev,
                             &meta,
@@ -130,7 +130,7 @@ pub async fn start_p2p_server(
                             return Err(MatrixError::AuthenticationRequired.to_string());
                         }
 
-                        let response = conduit_routes::conduit_server_process(
+                        let response = conduit_routes::process_request(
                             &database,
                             req,
                             &meta,

@@ -15,8 +15,7 @@ http = "0.2.1"
 reqwest = "0.10.6"
 tracing = "0.1.16"
 url = "2.1.1"
-# conduit = { git = "https://github.com/DevinR528/conduit", branch = "p2p" }
-conduit = { path = "../__forks__/conduit", default-features = false }
+conduit = { git = "https://github.com/DevinR528/conduit", branch = "p2p", default-features = false }
 serde_json = { version = "1.0.53", features = ["raw_value"] }
 
 [dependencies.tokio]

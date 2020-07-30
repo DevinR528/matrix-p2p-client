@@ -34,7 +34,7 @@ use tokio::{
 };
 use url::Url;
 
-pub async fn conduit_server_process(
+pub async fn process_request(
     database: &Database,
     ev: http::Request<Vec<u8>>,
     meta: &Metadata,
