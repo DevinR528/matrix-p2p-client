@@ -9,6 +9,7 @@ edition = "2018"
 [dependencies]
 libp2p = "0.22.0"
 matrix-sdk = { git = "https://github.com/DevinR528/matrix-rust-sdk", branch = "p2p/webrtc" }
+matrix-sdk-common = { git = "https://github.com/DevinR528/matrix-rust-sdk", branch = "p2p/webrtc" }
 async-trait = "0.1.36"
 http = "0.2.1"
 reqwest = "0.10.6"

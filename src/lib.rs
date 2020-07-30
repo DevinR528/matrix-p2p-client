@@ -18,11 +18,11 @@ use libp2p::{
 use async_trait::async_trait;
 use conduit::{
     client_server::join_room_by_id_route, ConduitResult, Config, Database, Error as ConduitError,
-    Ruma, State,
+    Ruma, RumaResponse, State,
 };
 use http::{Method as HttpMethod, Request, Response};
 use matrix_sdk::{
-    api::r0::membership::join_room_by_id,
+    api::r0::{membership::join_room_by_id, message::create_message_event},
     identifiers::{DeviceId, RoomId, UserId},
     Client as MatrixClient, ClientConfig, Endpoint, Error as MatrixError, HttpClient,
     Result as MatrixResult, Session,
@@ -35,9 +35,12 @@ use tokio::{
 };
 use url::Url;
 
+mod conduit_routes;
+
 pub async fn start_p2p_server(
     spawn: Handle,
-    client: P2PClient,
+    mut from_client: Receiver<http::Request<Vec<u8>>>,
+    mut to_client: Sender<http::Response<Vec<u8>>>,
     user_id: Option<UserId>,
     device_id: Option<Box<DeviceId>>,
 ) -> StdResult<(), String> {
@@ -61,7 +64,7 @@ pub async fn start_p2p_server(
             ignored_member: false,
         };
 
-        behaviour.floodsub.subscribe(floodsub_topic);
+        behaviour.floodsub.subscribe(floodsub_topic.clone());
         Swarm::new(transport, behaviour, local_peer_id)
     };
 
@@ -87,7 +90,6 @@ pub async fn start_p2p_server(
 
     let mut listening = false;
     let mut is_authenticated = false;
-
     // This loop listens for events from incoming connections
     let recv: StdResult<(), String> = spawn
         .spawn(async move {
@@ -99,82 +101,78 @@ pub async fn start_p2p_server(
                             return Err(MatrixError::AuthenticationRequired.to_string());
                         }
 
-                        // TODO make this a macro of some kind
-                        match meta.path.split('/').collect::<Vec<_>>().as_slice() {
-                            ["/_matrix", "client", "r0", "rooms", room_id, "join"] => {
-                                let body = Ruma {
-                                    json_body: serde_json::from_slice(ev.body()).ok(),
-                                    body: join_room_by_id::Request::try_from(ev).unwrap(),
-                                    user_id: user_id.clone(),
-                                    device_id: device_id.clone(),
-                                };
-                                let response = conduit::client_server::join_room_by_id_route(
-                                    State(&database),
-                                    body,
-                                    room_id.to_string(),
-                                )
-                                .map_err(|e| e.to_string())?;
-                            }
-                            ["/_matrix", "client", "r0", "rooms", room_id, "join"] => {}
-                            ["/_matrix", "client", "r0", "rooms", room_id, "join"] => {}
-                            // ["/_matrix", "client", "r0", "login"] if meta.method == http::Method::POST => {}
-                            _ => unimplemented!(),
+                        let response = conduit_routes::conduit_server_process(
+                            &database,
+                            ev,
+                            &meta,
+                            user_id.clone(),
+                            device_id.clone(),
+                            floodsub_topic.clone(),
+                        )
+                        .await?;
+
+                        // TODO what do we do with the headers and stuff ??
+                        swarm
+                            .floodsub
+                            .publish(floodsub_topic.clone(), response.into_body());
+                    }
+                    SwarmEvent::NewListenAddr(_) => {}
+                    // TODO do we handle the low level connection stuff ??
+                    _ => {}
+                }
+
+                // TODO figure out a way to do this in a separate `spawn`
+                // This processes the events received from the client and immediately responds
+                match from_client.recv().await {
+                    Some(req) => {
+                        let meta = <join_room_by_id::Request as Endpoint>::METADATA.clone();
+                        if meta.requires_authentication && !is_authenticated {
+                            return Err(MatrixError::AuthenticationRequired.to_string());
+                        }
+
+                        let response = conduit_routes::conduit_server_process(
+                            &database,
+                            req,
+                            &meta,
+                            user_id.clone(),
+                            device_id.clone(),
+                            floodsub_topic.clone(),
+                        )
+                        .await?;
+
+                        // Do we want to propagate the event out to peers depending on what the event was
+                        // TODO could call `swarm.floodsub.publish(...)` here or do we rely on /sync
+                        //
+
+                        if let Err(e) = to_client.send(response).await {
+                            // TODO make this error meaningful
+                            return Err("Failed to send response back to client".into());
                         }
                     }
-                    SwarmEvent::ConnectionEstablished {
-                        peer_id,
-                        endpoint,
-                        num_established,
-                    } => {}
-                    SwarmEvent::ConnectionClosed {
-                        peer_id,
-                        endpoint,
-                        num_established,
-                        cause,
-                    } => {}
-                    SwarmEvent::IncomingConnection {
-                        local_addr,
-                        send_back_addr,
-                    } => {}
-                    SwarmEvent::IncomingConnectionError {
-                        local_addr,
-                        send_back_addr,
-                        error,
-                    } => {}
-                    SwarmEvent::BannedPeer { peer_id, endpoint } => {}
-                    SwarmEvent::UnreachableAddr {
-                        peer_id,
-                        address,
-                        error,
-                        attempts_remaining,
-                    } => {}
-                    SwarmEvent::UnknownPeerUnreachableAddr { address, error } => {}
-                    SwarmEvent::NewListenAddr(addr) => {}
-                    SwarmEvent::ExpiredListenAddr(addr) => {}
-                    SwarmEvent::ListenerClosed { addresses, reason } => {}
-                    SwarmEvent::ListenerError { error } => {}
-                    SwarmEvent::Dialing(id) => {}
+                    None => {
+                        // TODO do something productive
+                        continue;
+                    }
                 }
             }
+
+            Ok(())
         })
         .await
         .map_err(|e| e.to_string())?;
+
     Ok(())
 }
 
-pub enum ClientInputEvents {
-    Message(String),
-}
-
 pub struct P2PClient {
-    from_user: Receiver<Request<Vec<u8>>>,
-    p2p_client: MatrixClient,
-}
-
-impl P2PClient {
-    pub async fn recv_input(&self) -> MatrixResult<Response<Vec<u8>>> {
-        unimplemented!()
-    }
+    /// The other half of this is `from_client` in conduits loop.
+    to_conduit: Arc<RwLock<Sender<Request<Vec<u8>>>>>,
+    /// The other half of this is also in the second half of the conduit loop.
+    from_conduit: Arc<RwLock<Receiver<Response<Vec<u8>>>>>,
+    /// TODO do we need to know if the user is authed at this point ??
+    is_authenticated: bool,
+    /// TODO Not sure if this is needed either ??
+    session: Arc<RwLock<Option<Session>>>,
 }
 
 #[async_trait]
@@ -188,8 +186,27 @@ impl HttpClient for P2PClient {
         method: HttpMethod,
         request: http::Request<Vec<u8>>,
     ) -> MatrixResult<reqwest::Response> {
-        //
-        Err(MatrixError::AuthenticationRequired)
+        if requires_auth && !self.is_authenticated {
+            return Err(MatrixError::AuthenticationRequired);
+        }
+
+        if let Err(e) = self.to_conduit.write().await.send(request).await {
+            return Err(MatrixError::MatrixError(matrix_sdk::BaseError::StateStore(
+                e.to_string(),
+            )));
+        }
+
+        loop {
+            match self.from_conduit.write().await.recv().await {
+                Some(resp) => {
+                    return Ok(reqwest::Response::from(resp));
+                }
+                None => {
+                    // TODO do something productive
+                    continue;
+                }
+            }
+        }
     }
 }
 
