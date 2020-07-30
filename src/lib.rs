@@ -96,18 +96,13 @@ pub async fn start_p2p_server(
             loop {
                 match swarm.next_event().await {
                     SwarmEvent::Behaviour(ev) => {
-                        let meta = <join_room_by_id::Request as Endpoint>::METADATA.clone();
-                        if meta.requires_authentication && !is_authenticated {
-                            return Err(MatrixError::AuthenticationRequired.to_string());
-                        }
-
                         let response = conduit_routes::process_request(
                             &database,
                             ev,
-                            &meta,
                             user_id.clone(),
                             device_id.clone(),
                             floodsub_topic.clone(),
+                            is_authenticated,
                         )
                         .await?;
 
@@ -125,18 +120,13 @@ pub async fn start_p2p_server(
                 // This processes the events received from the client and immediately responds
                 match from_client.recv().await {
                     Some(req) => {
-                        let meta = <join_room_by_id::Request as Endpoint>::METADATA.clone();
-                        if meta.requires_authentication && !is_authenticated {
-                            return Err(MatrixError::AuthenticationRequired.to_string());
-                        }
-
                         let response = conduit_routes::process_request(
                             &database,
                             req,
-                            &meta,
                             user_id.clone(),
                             device_id.clone(),
                             floodsub_topic.clone(),
+                            is_authenticated,
                         )
                         .await?;
 

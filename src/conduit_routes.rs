@@ -37,14 +37,21 @@ use url::Url;
 pub async fn process_request(
     database: &Database,
     ev: http::Request<Vec<u8>>,
-    meta: &Metadata,
     user_id: Option<UserId>,
     device_id: Option<Box<DeviceId>>,
     floodsub_topic: floodsub::Topic,
+    is_authenticated: bool,
 ) -> StdResult<http::Response<std::vec::Vec<u8>>, String> {
+    let path = ev.uri().to_string();
+
     // TODO make this a macro of some kind
-    match meta.path.split('/').collect::<Vec<_>>().as_slice() {
+    match path.split('/').collect::<Vec<_>>().as_slice() {
         ["/_matrix", "client", "r0", "rooms", room_id, "join"] if room_id.starts_with('!') => {
+            let meta = <join_room_by_id::Request as Endpoint>::METADATA;
+            if meta.requires_authentication && !is_authenticated {
+                return Err(MatrixError::AuthenticationRequired.to_string());
+            }
+
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: join_room_by_id::Request::try_from(ev).unwrap(),
