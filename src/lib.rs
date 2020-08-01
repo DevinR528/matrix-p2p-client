@@ -32,18 +32,31 @@ use tokio::{
     runtime::Handle,
     sync::mpsc::{channel, Receiver, Sender},
     sync::RwLock,
+    task::{JoinError, JoinHandle},
 };
 use url::Url;
 
 mod conduit_routes;
+mod matrix_client;
 
+pub use matrix_client::P2PClient;
+
+// TODO make errors and an Error type
+
+/// Returns a `JoinHandle` that controls the sending and receiving of request/response types
+/// to and from the client sdk and conduit's route functions.
+///
+/// This future cannot be awaited as it is an infinite loop and would halt the program.
+/// It must also be kept alive (do not `drop` this) until the program has ended.
 pub async fn start_p2p_server(
     spawn: Handle,
     mut from_client: Receiver<http::Request<Vec<u8>>>,
     mut to_client: Sender<http::Response<Vec<u8>>>,
+    connect_to: Option<String>,
+    room_id: Option<String>,
     user_id: Option<UserId>,
     device_id: Option<Box<DeviceId>>,
-) -> StdResult<(), String> {
+) -> Result<JoinHandle<Result<(), String>>, String> {
     // Create a random PeerId
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
@@ -91,113 +104,88 @@ pub async fn start_p2p_server(
     let mut listening = false;
     let mut is_authenticated = false;
     // This loop listens for events from incoming connections
-    let recv: StdResult<(), String> = spawn
-        .spawn(async move {
-            loop {
-                match swarm.next_event().await {
-                    SwarmEvent::Behaviour(ev) => {
-                        let response = conduit_routes::process_request(
-                            &database,
-                            ev,
-                            user_id.clone(),
-                            device_id.clone(),
-                            floodsub_topic.clone(),
-                            is_authenticated,
-                        )
-                        .await?;
+    Ok(spawn.spawn(async move {
+        loop {
+            match swarm.next_event().await {
+                SwarmEvent::Behaviour(ev) => {
+                    // TODO check headers and stuff
 
-                        // TODO what do we do with the headers and stuff ??
-                        swarm
-                            .floodsub
-                            .publish(floodsub_topic.clone(), response.into_body());
-                    }
-                    SwarmEvent::NewListenAddr(_) => {}
-                    // TODO do we handle the low level connection stuff ??
-                    _ => {}
+                    let response = conduit_routes::process_request(
+                        &database,
+                        ev,
+                        user_id.clone(),
+                        device_id.clone(),
+                        floodsub_topic.clone(),
+                        is_authenticated,
+                    )
+                    .await?;
+
+                    swarm
+                        .floodsub
+                        .publish(floodsub_topic.clone(), response.into_body());
                 }
-
-                // TODO figure out a way to do this in a separate `spawn`
-                // This processes the events received from the client and immediately responds
-                match from_client.recv().await {
-                    Some(req) => {
-                        let response = conduit_routes::process_request(
-                            &database,
-                            req,
-                            user_id.clone(),
-                            device_id.clone(),
-                            floodsub_topic.clone(),
-                            is_authenticated,
-                        )
-                        .await?;
-
-                        // Do we want to propagate the event out to peers depending on what the event was
-                        // TODO could call `swarm.floodsub.publish(...)` here or do we rely on /sync
-                        //
-
-                        if let Err(e) = to_client.send(response).await {
-                            // TODO make this error meaningful
-                            return Err("Failed to send response back to client".into());
-                        }
-                    }
-                    None => {
-                        // TODO do something productive
-                        continue;
-                    }
-                }
+                SwarmEvent::NewListenAddr(_) => {}
+                // TODO do we handle the low level connection stuff ??
+                _ => {}
             }
 
-            Ok(())
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+            // TODO figure out a way to do this in a separate `spawn`
+            // This processes the events received from the client and immediately responds
+            match from_client.recv().await {
+                Some(req) => {
+                    let request_method = req.method().clone();
 
-    Ok(())
-}
+                    let response = conduit_routes::process_request(
+                        &database,
+                        req,
+                        user_id.clone(),
+                        device_id.clone(),
+                        floodsub_topic.clone(),
+                        is_authenticated,
+                    )
+                    .await?;
 
-pub struct P2PClient {
-    /// The other half of this is `from_client` in conduits loop.
-    to_conduit: Arc<RwLock<Sender<Request<Vec<u8>>>>>,
-    /// The other half of this is also in the second half of the conduit loop.
-    from_conduit: Arc<RwLock<Receiver<Response<Vec<u8>>>>>,
-    /// TODO do we need to know if the user is authed at this point ??
-    is_authenticated: bool,
-    /// TODO Not sure if this is needed either ??
-    session: Arc<RwLock<Option<Session>>>,
-}
-
-#[async_trait]
-impl HttpClient for P2PClient {
-    /// The method abstracting sending request types and receiving response types.
-    async fn send_request(
-        &self,
-        requires_auth: bool,
-        homeserver: &Url,
-        session: &Arc<RwLock<Option<Session>>>,
-        method: HttpMethod,
-        request: http::Request<Vec<u8>>,
-    ) -> MatrixResult<reqwest::Response> {
-        if requires_auth && !self.is_authenticated {
-            return Err(MatrixError::AuthenticationRequired);
-        }
-
-        if let Err(e) = self.to_conduit.write().await.send(request).await {
-            return Err(MatrixError::MatrixError(matrix_sdk::BaseError::StateStore(
-                e.to_string(),
-            )));
-        }
-
-        loop {
-            match self.from_conduit.write().await.recv().await {
-                Some(resp) => {
-                    return Ok(reqwest::Response::from(resp));
+                    match request_method {
+                        HttpMethod::GET => {
+                            // The client has requested information from the "server".
+                            if let Err(e) = to_client.send(response).await {
+                                return Err("Failed to send response back to client".into());
+                            }
+                        }
+                        // Everything else needs to be shared with the other peers.
+                        HttpMethod::POST => {
+                            swarm
+                                .floodsub
+                                .publish(floodsub_topic.clone(), response.into_body());
+                        }
+                        HttpMethod::PUT => {
+                            swarm
+                                .floodsub
+                                .publish(floodsub_topic.clone(), response.into_body());
+                        }
+                        HttpMethod::DELETE => {
+                            swarm
+                                .floodsub
+                                .publish(floodsub_topic.clone(), response.into_body());
+                        }
+                        _ => panic!("Unsupported method used {}", request_method),
+                    }
                 }
                 None => {
+                    if !listening {
+                        for addr in Swarm::listeners(&swarm) {
+                            println!("Listening on {:?}", addr);
+                            listening = true;
+                        }
+                    }
                     // TODO do something productive
                     continue;
                 }
             }
         }
-    }
+
+        Ok(())
+    }))
 }
 
 #[derive(NetworkBehaviour)]
