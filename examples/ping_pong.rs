@@ -127,6 +127,7 @@ fn main() {
                     }
                     Ok(None) if sync_ready.load(Ordering::SeqCst) => {
                         if timer.elapsed().unwrap().as_secs() > 10 {
+                            println!("syncing");
                             timer = SystemTime::now();
                             matrix.sync(SyncSettings::default()).await.unwrap();
                             for message in matrix

@@ -19,7 +19,8 @@ url = "2.1.1"
 conduit = { path = "../__forks__/conduit", default-features = false }
 serde_json = { version = "1.0.53", features = ["raw_value"] }
 futures = "0.3.5"
-
+# routing
+path-tree = "0.1.11"
 [dependencies.tokio]
 version = "0.2.21"
 default-features = false
