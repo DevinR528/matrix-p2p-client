@@ -21,6 +21,8 @@ use matrix_sdk::{
         account::register::{self, RegistrationKind},
         membership::join_room_by_id,
         message::create_message_event,
+        room::create_room,
+        session::login,
         sync::sync_events,
         uiaa::{AuthData, UiaaInfo},
     },
@@ -48,7 +50,7 @@ pub fn process_request(
 
     // TODO make this a macro of some kind
     match path.split('/').collect::<Vec<_>>().as_slice() {
-        ["", "_matrix", "client", "r0", "rooms", room_id, "join?"] if room_id.starts_with('!') => {
+        ["", "_matrix", "client", "r0", "rooms", room_id, "join"] if room_id.starts_with("%21") => {
             let meta = <join_room_by_id::Request as Endpoint>::METADATA;
 
             let body = Ruma {
@@ -68,7 +70,7 @@ pub fn process_request(
             http::Response::<Vec<u8>>::try_from(response).map_err(|e| e.to_string())
         }
         ["", "_matrix", "client", "r0", "rooms", room_id, "send", event_type, txn_id]
-            if room_id.starts_with('!') =>
+            if room_id.starts_with("%21") =>
         {
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
@@ -155,6 +157,32 @@ pub fn process_request(
                 device_id,
             };
             let response = conduit::client_server::sync_route(State(&database), body)
+                .map_err(|e| e.to_string())?;
+
+            let RumaResponse(response) = response;
+            http::Response::<Vec<u8>>::try_from(response).map_err(|e| e.to_string())
+        }
+        ["", "_matrix", "client", "r0", "createRoom"] => {
+            let body = Ruma {
+                json_body: serde_json::from_slice(ev.body()).ok(),
+                body: create_room::Request::try_from(ev).unwrap(),
+                user_id,
+                device_id,
+            };
+            let response = conduit::client_server::create_room_route(State(&database), body)
+                .map_err(|e| e.to_string())?;
+
+            let RumaResponse(response) = response;
+            http::Response::<Vec<u8>>::try_from(response).map_err(|e| e.to_string())
+        }
+        ["", "_matrix", "client", "r0", "login"] => {
+            let body = Ruma {
+                json_body: serde_json::from_slice(ev.body()).ok(),
+                body: login::Request::try_from(ev).unwrap(),
+                user_id,
+                device_id,
+            };
+            let response = conduit::client_server::login_route(State(&database), body)
                 .map_err(|e| e.to_string())?;
 
             let RumaResponse(response) = response;

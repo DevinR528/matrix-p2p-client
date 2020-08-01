@@ -40,7 +40,7 @@ pub struct P2PClient {
     /// The other half of this is `from_client` in conduits loop.
     to_conduit: Arc<RwLock<Sender<Request<Vec<u8>>>>>,
     /// The other half of this is also in the second half of the conduit loop.
-    from_conduit: Arc<RwLock<Receiver<Response<Vec<u8>>>>>,
+    from_conduit: Arc<RwLock<Receiver<Result<Response<Vec<u8>>, String>>>>,
     /// TODO do we need to know if the user is authed at this point ??
     is_authenticated: bool,
     /// TODO Not sure if this is needed either ??
@@ -54,7 +54,7 @@ impl P2PClient {
         user_id: UserId,
         device_id: Box<DeviceId>,
         to_conduit: Sender<Request<Vec<u8>>>,
-        from_conduit: Receiver<Response<Vec<u8>>>,
+        from_conduit: Receiver<Result<Response<Vec<u8>>, String>>,
     ) -> Self {
         Self {
             to_conduit: Arc::new(RwLock::new(to_conduit)),
@@ -92,16 +92,12 @@ impl HttpClient for P2PClient {
         // poll for the response
         // TODO I'm assuming that we cannot get responses out of order here
         // this may be wrong, check.
-        loop {
-            match self.from_conduit.write().await.recv().await {
-                Some(resp) => {
-                    return Ok(reqwest::Response::from(resp));
-                }
-                None => {
-                    // TODO do something productive
-                    continue;
-                }
-            }
+        match self.from_conduit.write().await.recv().await {
+            Some(Ok(resp)) => Ok(reqwest::Response::from(resp)),
+            Some(Err(err)) => Err(MatrixError::MatrixError(matrix_sdk::BaseError::StateStore(
+                err,
+            ))),
+            _ => panic!("from_conduit channel shutdown"),
         }
     }
 }
