@@ -45,10 +45,14 @@ pub struct P2PClient {
     is_authenticated: bool,
     /// TODO Not sure if this is needed either ??
     session: Arc<RwLock<Option<Session>>>,
+    user_id: UserId,
+    device_id: Box<DeviceId>,
 }
 
 impl P2PClient {
     pub fn new(
+        user_id: UserId,
+        device_id: Box<DeviceId>,
         to_conduit: Sender<Request<Vec<u8>>>,
         from_conduit: Receiver<Response<Vec<u8>>>,
     ) -> Self {
@@ -57,6 +61,8 @@ impl P2PClient {
             from_conduit: Arc::new(RwLock::new(from_conduit)),
             is_authenticated: false,
             session: Arc::new(RwLock::new(None)),
+            user_id,
+            device_id,
         }
     }
 }
@@ -72,9 +78,9 @@ impl HttpClient for P2PClient {
         method: HttpMethod,
         request: http::Request<Vec<u8>>,
     ) -> MatrixResult<reqwest::Response> {
-        if requires_auth && !self.is_authenticated {
-            return Err(MatrixError::AuthenticationRequired);
-        }
+        // if requires_auth && !self.is_authenticated {
+        //     return Err(MatrixError::AuthenticationRequired);
+        // }
 
         // Send a request to conduit directly
         if let Err(e) = self.to_conduit.write().await.send(request).await {

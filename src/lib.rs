@@ -3,6 +3,7 @@
 use std::{
     convert::{TryFrom, TryInto},
     fmt::Debug,
+    ops::{Deref, DerefMut},
     result::Result as StdResult,
     sync::Arc,
 };
@@ -48,10 +49,11 @@ pub use matrix_client::P2PClient;
 ///
 /// This future cannot be awaited as it is an infinite loop and would halt the program.
 /// It must also be kept alive (do not `drop` this) until the program has ended.
-pub async fn start_p2p_server(
+pub fn start_p2p_server(
     spawn: Handle,
     mut from_client: Receiver<http::Request<Vec<u8>>>,
     mut to_client: Sender<http::Response<Vec<u8>>>,
+    db_path: String,
     connect_to: Option<String>,
     room_id: Option<String>,
     user_id: Option<UserId>,
@@ -99,37 +101,26 @@ pub async fn start_p2p_server(
     )
     .map_err(|e| e.to_string())?;
 
-    let database = Database::load_or_create(&Config::development()).map_err(|e| e.to_string())?;
+    let mut config = Config::development();
+    *config
+        .extras
+        .entry("database_path".to_owned())
+        .or_insert(format!("./{}", db_path).into()) = format!("./{}", db_path).into();
+
+    let database = Database::load_or_create(&config).map_err(|e| e.to_string())?;
+    let database = Arc::new(database);
+    let server_db = database.clone();
+
+    let user_id_clone = user_id.clone();
+    let device_id_clone = device_id.clone();
+
+    let floodsub_clone = floodsub_topic.clone();
+    let (mut to_swarm, mut swarm_receiver) = channel(1024);
 
     let mut listening = false;
-    let mut is_authenticated = false;
     // This loop listens for events from incoming connections
-    Ok(spawn.spawn(async move {
+    spawn.spawn(async move {
         loop {
-            match swarm.next_event().await {
-                SwarmEvent::Behaviour(ev) => {
-                    // TODO check headers and stuff
-
-                    let response = conduit_routes::process_request(
-                        &database,
-                        ev,
-                        user_id.clone(),
-                        device_id.clone(),
-                        floodsub_topic.clone(),
-                        is_authenticated,
-                    )
-                    .await?;
-
-                    swarm
-                        .floodsub
-                        .publish(floodsub_topic.clone(), response.into_body());
-                }
-                SwarmEvent::NewListenAddr(_) => {}
-                // TODO do we handle the low level connection stuff ??
-                _ => {}
-            }
-
-            // TODO figure out a way to do this in a separate `spawn`
             // This processes the events received from the client and immediately responds
             match from_client.recv().await {
                 Some(req) => {
@@ -138,52 +129,103 @@ pub async fn start_p2p_server(
                     let response = conduit_routes::process_request(
                         &database,
                         req,
-                        user_id.clone(),
-                        device_id.clone(),
-                        floodsub_topic.clone(),
-                        is_authenticated,
-                    )
-                    .await?;
+                        user_id_clone.clone(),
+                        device_id_clone.clone(),
+                        floodsub_clone.clone(),
+                    );
+
+                    let response = match response {
+                        Ok(val) => val,
+                        Err(e) => panic!("{:?}", e),
+                    };
 
                     match request_method {
                         HttpMethod::GET => {
                             // The client has requested information from the "server".
                             if let Err(e) = to_client.send(response).await {
-                                return Err("Failed to send response back to client".into());
+                                return Err("Failed to send response back to client".to_string());
                             }
                         }
                         // Everything else needs to be shared with the other peers.
                         HttpMethod::POST => {
-                            swarm
-                                .floodsub
-                                .publish(floodsub_topic.clone(), response.into_body());
+                            to_swarm
+                                .send((floodsub_clone.clone(), response.into_body()))
+                                .await
+                                .unwrap();
                         }
                         HttpMethod::PUT => {
-                            swarm
-                                .floodsub
-                                .publish(floodsub_topic.clone(), response.into_body());
+                            to_swarm
+                                .send((floodsub_clone.clone(), response.into_body()))
+                                .await
+                                .unwrap();
                         }
                         HttpMethod::DELETE => {
-                            swarm
-                                .floodsub
-                                .publish(floodsub_topic.clone(), response.into_body());
+                            to_swarm
+                                .send((floodsub_clone.clone(), response.into_body()))
+                                .await
+                                .unwrap();
                         }
                         _ => panic!("Unsupported method used {}", request_method),
                     }
                 }
                 None => {
-                    if !listening {
-                        for addr in Swarm::listeners(&swarm) {
-                            println!("Listening on {:?}", addr);
-                            listening = true;
-                        }
-                    }
+                    if !listening {}
                     // TODO do something productive
                     continue;
                 }
             }
         }
 
+        Ok(())
+    });
+
+    Ok(spawn.spawn(async move {
+        use futures::{future, prelude::*};
+        use libp2p::futures::StreamExt;
+        use std::{
+            ptr,
+            task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
+        };
+
+        future::poll_fn(move |cx: &mut Context<'_>| {
+            loop {
+                match swarm_receiver.try_recv() {
+                    Ok((floodsub, resp)) => swarm.floodsub.publish(floodsub, resp),
+                    _ => break,
+                }
+            }
+            loop {
+                match swarm.poll_next_unpin(cx) {
+                    Poll::Ready(Some(ev)) => {
+                        // TODO check headers and stuff
+
+                        let response = conduit_routes::process_request(
+                            &server_db,
+                            ev,
+                            user_id.clone(),
+                            device_id.clone(),
+                            floodsub_topic.clone(),
+                        )?;
+
+                        swarm
+                            .floodsub
+                            .publish(floodsub_topic.clone(), response.into_body());
+                    }
+                    Poll::Ready(None) => return Poll::Ready(Ok::<_, String>(())),
+                    Poll::Pending => {
+                        if !listening {
+                            for addr in Swarm::listeners(&swarm) {
+                                println!("Listening on {:?}", addr);
+                                listening = true;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            Poll::Pending
+        })
+        .await;
         Ok(())
     }))
 }
