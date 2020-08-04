@@ -1,23 +1,9 @@
-use std::{
-    convert::{TryFrom, TryInto},
-    fmt::Debug,
-    result::Result as StdResult,
-    sync::Arc,
-};
+use std::{convert::TryFrom, result::Result as StdResult};
 
-use libp2p::{
-    floodsub::{self, Floodsub, FloodsubEvent},
-    identity,
-    mdns::{Mdns, MdnsEvent},
-    swarm::{NetworkBehaviourEventProcess, Swarm, SwarmEvent},
-    Multiaddr, NetworkBehaviour, PeerId,
-};
-
-use async_trait::async_trait;
-use conduit::{ConduitResult, Config, Database, Error as ConduitError, Ruma, RumaResponse, State};
-use http::{Method as HttpMethod, Request, Response};
-use matrix_sdk::{
-    api::r0::{
+use conduit::{Database, Error as ConduitError, Ruma, RumaResponse, State};
+use libp2p::floodsub;
+use ruma::{
+    api::client::r0::{
         account::register::{self, RegistrationKind},
         membership::join_room_by_id,
         message::create_message_event,
@@ -26,66 +12,49 @@ use matrix_sdk::{
         sync::sync_events,
         uiaa::{AuthData, UiaaInfo},
     },
-    identifiers::{DeviceId, RoomId, UserId},
-    Client as MatrixClient, ClientConfig, Endpoint, Error as MatrixError, HttpClient,
-    Result as MatrixResult, Session,
+    identifiers::{DeviceId, UserId},
 };
-use matrix_sdk_common::Metadata;
-use reqwest::header::{HeaderValue, AUTHORIZATION};
-use tokio::{
-    runtime::Handle,
-    sync::mpsc::{channel, Receiver, Sender},
-    sync::RwLock,
-};
-use url::Url;
 
-pub fn process_request(
+pub async fn process_request(
     database: &Database,
     ev: http::Request<Vec<u8>>,
     user_id: Option<UserId>,
     device_id: Option<Box<DeviceId>>,
-    floodsub_topic: floodsub::Topic,
+    _floodsub_topic: floodsub::Topic,
 ) -> StdResult<http::Response<std::vec::Vec<u8>>, String> {
     let path = ev.uri().to_string();
 
     // TODO make this a macro of some kind
     match path.split('/').collect::<Vec<_>>().as_slice() {
         ["", "_matrix", "client", "r0", "rooms", room_id, "join"] if room_id.starts_with("%21") => {
-            let meta = <join_room_by_id::Request as Endpoint>::METADATA;
-
+            println!("make join response conduit");
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: join_room_by_id::Request::try_from(ev).unwrap(),
-                user_id,
+                sender_id: user_id,
                 device_id,
             };
-            let response = conduit::client_server::join_room_by_id_route(
-                State(&database),
-                body,
-                room_id.to_string(),
-            )
-            .map_err(|e| e.to_string())?;
+            let response = conduit::client_server::join_room_by_id_route(State(&database), body)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            println!("post join");
 
             let RumaResponse(response) = response;
             http::Response::<Vec<u8>>::try_from(response).map_err(|e| e.to_string())
         }
-        ["", "_matrix", "client", "r0", "rooms", room_id, "send", event_type, txn_id]
+        ["", "_matrix", "client", "r0", "rooms", room_id, "send", _event_type, _txn_id]
             if room_id.starts_with("%21") =>
         {
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: create_message_event::Request::try_from(ev).unwrap(),
-                user_id,
+                sender_id: user_id,
                 device_id,
             };
-            let response = conduit::client_server::create_message_event_route(
-                State(&database),
-                body,
-                room_id.to_string(),
-                event_type.to_string(),
-                txn_id.to_string(),
-            )
-            .map_err(|e| e.to_string())?;
+            let response =
+                conduit::client_server::create_message_event_route(State(&database), body)
+                    .map_err(|e| e.to_string())?;
 
             let RumaResponse(response) = response;
             http::Response::<Vec<u8>>::try_from(response).map_err(|e| e.to_string())
@@ -97,19 +66,13 @@ pub fn process_request(
             let body = Ruma {
                 json_body: serde_json::from_slice(body.as_slice()).ok(),
                 body: req,
-                user_id: user_id.clone(),
+                sender_id: user_id.clone(),
                 device_id: device_id.clone(),
             };
 
             let response = match conduit::client_server::register_route(State(&database), body) {
                 Ok(res) => res,
-                Err(ConduitError::Uiaa(UiaaInfo {
-                    flows,
-                    params,
-                    completed,
-                    session,
-                    ..
-                })) => {
+                Err(ConduitError::Uiaa(UiaaInfo { flows, .. })) => {
                     if flows[0].stages[0] == "m.login.dummy" {
                         let reg = register::Request {
                             password: None,
@@ -136,7 +99,7 @@ pub fn process_request(
                             }))
                             .ok(),
                             body: reg,
-                            user_id,
+                            sender_id: user_id,
                             device_id,
                         };
                         conduit::client_server::register_route(State(&database), body).unwrap()
@@ -153,10 +116,11 @@ pub fn process_request(
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: sync_events::Request::try_from(ev).unwrap(),
-                user_id,
+                sender_id: user_id,
                 device_id,
             };
-            let response = conduit::client_server::sync_route(State(&database), body)
+            let response = conduit::client_server::sync_events_route(State(&database), body)
+                .await
                 .map_err(|e| e.to_string())?;
 
             let RumaResponse(response) = response;
@@ -166,7 +130,7 @@ pub fn process_request(
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: create_room::Request::try_from(ev).unwrap(),
-                user_id,
+                sender_id: user_id,
                 device_id,
             };
             let response = conduit::client_server::create_room_route(State(&database), body)
@@ -179,7 +143,7 @@ pub fn process_request(
             let body = Ruma {
                 json_body: serde_json::from_slice(ev.body()).ok(),
                 body: login::Request::try_from(ev).unwrap(),
-                user_id,
+                sender_id: user_id,
                 device_id,
             };
             let response = conduit::client_server::login_route(State(&database), body)

@@ -1,15 +1,4 @@
-#![allow(unused, unused_variables)]
-
-use std::{
-    convert::{TryFrom, TryInto},
-    fmt::Debug,
-    ops::{Deref, DerefMut},
-    result::Result as StdResult,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-};
+use std::sync::Arc;
 
 use libp2p::{
     floodsub::{self, Floodsub, FloodsubEvent},
@@ -19,26 +8,13 @@ use libp2p::{
     Multiaddr, NetworkBehaviour, PeerId,
 };
 
-use async_trait::async_trait;
-use conduit::{
-    client_server::join_room_by_id_route, ConduitResult, Config, Database, Error as ConduitError,
-    Ruma, RumaResponse, State,
-};
-use http::{Method as HttpMethod, Request, Response};
-use matrix_sdk::{
-    api::r0::{membership::join_room_by_id, message::create_message_event},
-    identifiers::{DeviceId, RoomId, UserId},
-    Client as MatrixClient, ClientConfig, Endpoint, Error as MatrixError, HttpClient,
-    Result as MatrixResult, Session,
-};
-use reqwest::header::{HeaderValue, AUTHORIZATION};
+use conduit::{Config, Database};
+use http::{Method as HttpMethod, Request};
+use ruma::identifiers::{DeviceId, UserId};
 use tokio::{
     runtime::Handle,
     sync::mpsc::{channel, Receiver, Sender},
-    sync::RwLock,
-    task::{JoinError, JoinHandle},
 };
-use url::Url;
 
 mod conduit_routes;
 mod matrix_client;
@@ -58,8 +34,6 @@ pub fn start_p2p_server(
     mut from_client: Receiver<http::Request<Vec<u8>>>,
     mut to_client: Sender<Result<http::Response<Vec<u8>>, String>>,
     db_path: String,
-    connect_to: Option<String>,
-    room_id: Option<String>,
     user_id: Option<UserId>,
     device_id: Option<Box<DeviceId>>,
 ) -> Result<(), String> {
@@ -97,7 +71,7 @@ pub fn start_p2p_server(
     // Read full lines from stdin
 
     // Listen on all interfaces and whatever port the OS assigns
-    let listen_id = Swarm::listen_on(
+    let _listen_id = Swarm::listen_on(
         &mut swarm,
         "/ip4/0.0.0.0/tcp/0"
             .parse()
@@ -137,44 +111,46 @@ pub fn start_p2p_server(
                         user_id_clone.clone(),
                         device_id_clone.clone(),
                         floodsub_clone.clone(),
-                    );
-                    // .await;
+                    )
+                    .await;
 
                     match request_method {
                         HttpMethod::GET => {
+                            println!("GET");
                             match response {
                                 Err(e) => {
                                     // Send the error from the request back to the client
                                     if let Err(e) = to_client.send(Err(e)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("GET failed to send response back to client {}", e);
                                     }
                                 }
                                 Ok(response) => {
                                     let body = response.body().clone();
                                     // The client has requested information from the "server".
                                     if let Err(e) = to_client.send(Ok(response)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("GET failed to send response back to client {}", e);
                                     }
                                     // propagate the event out
+                                    // TODO we only want to send `Ok` responses right ?
                                     to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
                                 }
                             }
                         }
                         // Everything else needs to be shared with the other peers.
                         HttpMethod::POST => {
+                            println!("POST");
                             match response {
                                 Err(e) => {
                                     // The client has requested information from the "server".
                                     if let Err(e) = to_client.send(Err(e)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("POST failed to send response back to client {}", e);
                                     }
-                                    // to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
                                 }
                                 Ok(response) => {
                                     let body = response.body().clone();
 
                                     if let Err(e) = to_client.send(Ok(response)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("POST failed to send response back to client {}", e);
                                     }
 
                                     to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
@@ -182,19 +158,19 @@ pub fn start_p2p_server(
                             }
                         }
                         HttpMethod::PUT => {
+                            println!("PUT");
                             match response {
                                 Err(e) => {
                                     // The client has requested information from the "server".
                                     if let Err(e) = to_client.send(Err(e)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("PUT failed to send response back to client {}", e);
                                     }
-                                    // to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
                                 }
                                 Ok(response) => {
                                     let body = response.body().clone();
 
                                     if let Err(e) = to_client.send(Ok(response)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!("PUT failed to send response back to client {}", e);
                                     }
 
                                     to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
@@ -202,19 +178,25 @@ pub fn start_p2p_server(
                             }
                         }
                         HttpMethod::DELETE => {
+                            println!("DELETE");
                             match response {
                                 Err(e) => {
                                     // The client has requested information from the "server".
                                     if let Err(e) = to_client.send(Err(e)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!(
+                                            "DELETE failed to send response back to client {}",
+                                            e
+                                        );
                                     }
-                                    // to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
                                 }
                                 Ok(response) => {
                                     let body = response.body().clone();
 
                                     if let Err(e) = to_client.send(Ok(response)).await {
-                                        panic!("GET failed to send response back to client");
+                                        panic!(
+                                            "DELETE failed to send response back to client {}",
+                                            e
+                                        );
                                     }
 
                                     to_swarm.send((floodsub_clone.clone(), body)).await.unwrap();
@@ -230,58 +212,55 @@ pub fn start_p2p_server(
     });
 
     spawn.spawn(async move {
-        use futures::{future, prelude::*, StreamExt};
-        use std::{
-            ptr,
-            task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
-        };
-
-        future::poll_fn(move |cx: &mut Context<'_>| {
-            while let Ok((floodsub, resp)) = swarm_receiver.try_recv() {
-                swarm.floodsub.publish(floodsub, resp);
-            }
-
-            loop {
-                match swarm.poll_next_unpin(cx) {
-                    Poll::Ready(Some(ev)) => {
-                        // TODO check headers and stuff
-
-                        // TODO this will have to be async
-                        let response = conduit_routes::process_request(
-                            &server_db,
-                            ev,
-                            user_id.clone(),
-                            device_id.clone(),
-                            floodsub_topic.clone(),
-                        )?;
-
-                        // let response = loop {
-                        //     tokio::pin!(fut);
-                        //     match (&mut fut).poll(cx) {
-                        //         Poll::Ready(Ok(res)) => break res,
-                        //         _ => continue,
-                        //     }
-                        // };
-
-                        swarm
-                            .floodsub
-                            .publish(floodsub_topic.clone(), response.into_body());
-                    }
-                    Poll::Ready(None) => return Poll::Ready(Ok::<_, String>(())),
-                    Poll::Pending => {
-                        if !listening {
-                            for addr in Swarm::listeners(&swarm) {
-                                println!("Listening on {:?}", addr);
-                                listening = true;
-                            }
-                        }
-                        break;
-                    }
+        loop {
+            // Connect ourselves
+            if !listening {
+                for addr in Swarm::listeners(&swarm) {
+                    println!("Listening on {:?}", addr);
+                    listening = true;
                 }
             }
-            Poll::Pending
-        })
-        .await; // await `poll_fn` future that we made not the spawned task
+
+            // Race to handle the event that happens first then loop
+            let res = tokio::select! {
+                received = swarm_receiver.recv() => {
+                    match received {
+                        Some((floodsub, resp)) => {
+                            swarm.floodsub.publish(floodsub, resp);
+                            Ok::<_, String>(())
+                        },
+                        None => panic!("swarm_receiver's sender shutdown"),
+                    }
+                }
+                event = swarm.next_event() => {
+                    match event {
+                        SwarmEvent::Behaviour(ev) => {
+                            let response: Result<_, String> = conduit_routes::process_request(
+                                &server_db,
+                                ev,
+                                user_id.clone(),
+                                device_id.clone(),
+                                floodsub_topic.clone(),
+                            ).await;
+
+                            // FIXME For some reason `?` does not work here
+                            let response = match response {
+                                Ok(res) => res,
+                                Err(err) => return Err::<(), String>(err)
+                            };
+
+                            swarm
+                                .floodsub
+                                .publish(floodsub_topic.clone(), response.into_body());
+                            Ok(())
+                        }
+                        _ => Ok(()),
+                    }
+                }
+            };
+            // Make sure no error happened during the race
+            res?;
+        }
     });
 
     Ok(())

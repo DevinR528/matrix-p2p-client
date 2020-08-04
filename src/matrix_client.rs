@@ -1,46 +1,24 @@
-#![allow(unused, unused_variables)]
-
-use std::{
-    convert::{TryFrom, TryInto},
-    fmt::Debug,
-    result::Result as StdResult,
-    sync::Arc,
-};
-
-use libp2p::{
-    floodsub::{self, Floodsub, FloodsubEvent},
-    identity,
-    mdns::{Mdns, MdnsEvent},
-    swarm::{NetworkBehaviourEventProcess, Swarm, SwarmEvent},
-    Multiaddr, NetworkBehaviour, PeerId,
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use conduit::{
-    client_server::join_room_by_id_route, ConduitResult, Config, Database, Error as ConduitError,
-    Ruma, RumaResponse, State,
-};
 use http::{Method as HttpMethod, Request, Response};
-use matrix_sdk::{
-    api::r0::{membership::join_room_by_id, message::create_message_event},
-    identifiers::{DeviceId, RoomId, UserId},
-    Client as MatrixClient, ClientConfig, Endpoint, Error as MatrixError, HttpClient,
-    Result as MatrixResult, Session,
-};
-use reqwest::header::{HeaderValue, AUTHORIZATION};
-use tokio::{
-    runtime::Handle,
-    sync::mpsc::{channel, Receiver, Sender},
-    sync::RwLock,
-    task::{JoinError, JoinHandle},
+use matrix_sdk::{Error as MatrixError, HttpClient, Result as MatrixResult, Session};
+use ruma::identifiers::{DeviceId, UserId};
+use tokio::sync::{
+    mpsc::{Receiver, Sender},
+    RwLock,
 };
 use url::Url;
 
+pub type ConduitSender = Arc<RwLock<Receiver<Result<Response<Vec<u8>>, String>>>>;
+pub type ConduitReceiver = Arc<RwLock<Sender<Request<Vec<u8>>>>>;
+
+#[allow(unused)]
 pub struct P2PClient {
     /// The other half of this is `from_client` in conduits loop.
-    to_conduit: Arc<RwLock<Sender<Request<Vec<u8>>>>>,
+    to_conduit: ConduitReceiver,
     /// The other half of this is also in the second half of the conduit loop.
-    from_conduit: Arc<RwLock<Receiver<Result<Response<Vec<u8>>, String>>>>,
+    from_conduit: ConduitSender,
     /// TODO do we need to know if the user is authed at this point ??
     is_authenticated: bool,
     /// TODO Not sure if this is needed either ??
@@ -72,10 +50,10 @@ impl HttpClient for P2PClient {
     /// The method abstracting sending request types and receiving response types.
     async fn send_request(
         &self,
-        requires_auth: bool,
-        homeserver: &Url,
-        session: &Arc<RwLock<Option<Session>>>,
-        method: HttpMethod,
+        _requires_auth: bool,
+        _homeserver: &Url,
+        _session: &Arc<RwLock<Option<Session>>>,
+        _method: HttpMethod,
         request: http::Request<Vec<u8>>,
     ) -> MatrixResult<reqwest::Response> {
         // if requires_auth && !self.is_authenticated {

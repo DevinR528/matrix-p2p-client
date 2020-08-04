@@ -4,22 +4,25 @@ use std::{
     convert::TryFrom,
     env,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 
 use matrix_rust_p2p_client::{start_p2p_server, P2PClient};
 use matrix_sdk::{
-    api::r0::room::Visibility,
+    uuid::Uuid, BaseError as MxBaseError, Client as MatrixClient, ClientConfig, Error as MxError,
+    RegistrationBuilder, RoomBuilder, Session, SyncSettings,
+};
+use ruma::{
+    api::client::r0::room::Visibility,
     events::{
         room::message::{MessageEventContent, RelatesTo, TextMessageEventContent},
         AnyPossiblyRedactedSyncMessageEvent, AnySyncMessageEvent, SyncMessageEvent,
     },
     identifiers::{DeviceId, RoomId, UserId},
-    uuid::Uuid,
-    BaseError as MxBaseError, Client as MatrixClient, ClientConfig, Error as MxError,
-    RegistrationBuilder, RoomBuilder, Session, SyncSettings,
 };
 use tokio::{
     io::{self, AsyncBufReadExt},
@@ -31,7 +34,8 @@ use url::Url;
 fn main() {
     let args = env::args().collect::<Vec<_>>();
 
-    let (connect_to, room_id_str) = match args.as_slice() {
+    // connect_to is the ip address of the 2nd user
+    let (_connect_to, room_id_str) = match args.as_slice() {
         [] | [_, _] => panic!(),
         [_binary] => (None, None),
         [_bin, ip_addr, room_id, ..] => (Some(ip_addr.to_owned()), Some(room_id.to_owned())),
@@ -59,7 +63,7 @@ fn main() {
     let ui_reactor = runtime.handle().clone();
 
     runtime.block_on(async move {
-        let flag = Arc::new(AtomicBool::default());
+        let start_ui = Arc::new(AtomicBool::default());
         let sync_ready = Arc::new(AtomicBool::default());
 
         // start the database before making any requests to conduit
@@ -68,8 +72,6 @@ fn main() {
             from_client,
             to_client,
             room_id_str.clone().unwrap_or_else(|| "user_one".to_owned()),
-            connect_to,
-            room_id_str.clone(),
             Some(user_id),
             Some(device_id),
         )
@@ -80,13 +82,13 @@ fn main() {
 
         let matrix_copy = matrix.clone();
 
-        let flag_clone = flag.clone();
-        let sync_ready_copy = sync_ready.clone();
+        let start_ui_clone = start_ui.clone();
+        let sync_ready_clone = sync_ready.clone();
 
         let login = ui_reactor.spawn(async move {
             let mut rid = room_id.write().await;
             let rid = rid.deref_mut();
-            *rid = login_and_join_room(&matrix_copy, room_id_str, flag, sync_ready_copy)
+            *rid = login_and_join_room(&matrix_copy, room_id_str, start_ui, sync_ready_clone)
                 .await
                 .unwrap();
         });
@@ -96,7 +98,7 @@ fn main() {
             let mut timer = SystemTime::now();
 
             loop {
-                if !flag_clone.load(Ordering::SeqCst) {
+                if !start_ui_clone.load(Ordering::SeqCst) {
                     std::sync::atomic::spin_loop_hint();
                     continue;
                 }
@@ -234,6 +236,7 @@ async fn login_and_join_room(
             Ok(res) => res.room_id,
             Err(err) => match err {
                 MxError::MatrixError(MxBaseError::StateStore(err)) => {
+                    println!("joining room");
                     if err.starts_with("M_ROOM_IN_USE") {
                         client
                             .join_room_by_id(
